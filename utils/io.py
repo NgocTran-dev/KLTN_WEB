@@ -2,6 +2,8 @@ import streamlit as st
 import pandas as pd
 from utils.io import load_data
 from utils.tax import registration_fee_land, non_agri_land_tax_simple, pit_transfer_tax
+from pathlib import Path
+DATA_PATH = Path(__file__).resolve().parents[1] / "data" / "RegTech_Data_Q1_Q5_2026.xlsx"
 
 st.set_page_config(page_title="Tax & Fees", page_icon="🧾", layout="wide")
 st.title("🧾 Tax & Fee Estimates (illustrative) — based on Gov Price 2026")
