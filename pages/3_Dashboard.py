@@ -1,79 +1,131 @@
 import streamlit as st
 import pandas as pd
+import matplotlib.pyplot as plt
+import pydeck as pdk
+import numpy as np
 from utils.io import load_data
-from utils.scoring import normalize_gap, risk_score, risk_level
 
-st.set_page_config(page_title="Price Lookup", page_icon="🔎", layout="wide")
-st.title("🔎 Price Lookup — Gov Price 2026, Market Reference, Price Gap, Risk Score")
+st.set_page_config(page_title="Dashboard", page_icon="📊", layout="wide")
+st.title("📊 Dashboard — Price Gap & Risk Score (District 1 & 5)")
 
 df, _, _ = load_data()
 
-# Filters
+LAT, LON = "Latitude", "Longitude"
+DISTRICT, WARD, STREET = "District", "Ward", "Street"
+GAP = "Price Gap Corrected" if "Price Gap Corrected" in df.columns else "Price Gap (MarketRef / GovPrice)"
+RISK = "Risk Score"
+
+# filters
 c1, c2, c3 = st.columns([1, 1, 2])
 with c1:
-    district = st.selectbox("District", ["1", "5"], index=0)
-sub = df[df["District"].astype(str).str.contains(district)].copy()
-
-wards = sorted([w for w in sub["Ward"].dropna().unique().tolist()])
+    district_filter = st.selectbox("District filter", ["All", "1", "5"], index=0)
 with c2:
-    ward = st.selectbox("Ward", wards)
-
-sub = sub[sub["Ward"] == ward].copy()
-streets = sorted([r for r in sub["Street"].dropna().unique().tolist()])
+    signal = st.selectbox("Signal", ["Risk Score", "Price Gap"], index=0)
 with c3:
-    street = st.selectbox("Street", streets)
+    layer_type = st.selectbox("Map layer", ["Scatter", "Heatmap", "Hexagon"], index=0)
 
-sub = sub[sub["Street"] == street].copy()
+dff = df.copy()
+if district_filter != "All":
+    dff = dff[dff[DISTRICT].astype(str).str.contains(district_filter)].copy()
 
+# numeric + coords
+dff[LAT] = pd.to_numeric(dff.get(LAT), errors="coerce")
+dff[LON] = pd.to_numeric(dff.get(LON), errors="coerce")
+dff = dff.dropna(subset=[LAT, LON]).copy()
 
-    # If corrected columns exist (recommended)
-    gov_corr_col = "Gov Price 2026 Corrected (million VND/m²)" if "Gov Price 2026 Corrected (million VND/m²)" in sub.columns else None
-    gap_corr_col = "Price Gap Corrected" if "Price Gap Corrected" in sub.columns else None
+if dff.empty:
+    st.error("No rows with Latitude/Longitude after filtering. Please check your data file.")
+    st.stop()
 
-    # Aggregate key metrics
-gov_col = "Government Unit Price 2026 (million VND/m²)"
-mref_col = "Market Reference Unit Price (median, million VND/m²)"
-fake_col = "Fake Probability (data quality)"
+weight_col = RISK if signal == "Risk Score" else GAP
+dff[weight_col] = pd.to_numeric(dff.get(weight_col), errors="coerce").fillna(0)
 
-gov = pd.to_numeric(sub[gov_corr_col], errors="coerce").median() if gov_corr_col else pd.to_numeric(sub[gov_col], errors="coerce").median()
-mref = pd.to_numeric(sub[mref_col], errors="coerce").median()
-gap = (mref / gov) if (pd.notna(mref) and pd.notna(gov) and gov != 0) else None
-    if gap_corr_col:
-        gap2 = pd.to_numeric(sub[gap_corr_col], errors="coerce").median()
-    else:
-        gap2 = None
+# jitter option (avoid overlap)
+jitter = st.checkbox("Add tiny jitter (recommended)", value=True)
+if jitter:
+    rng = np.random.default_rng(42)
+    dff["_lat"] = dff[LAT] + rng.normal(0, 0.00015, size=len(dff))
+    dff["_lon"] = dff[LON] + rng.normal(0, 0.00015, size=len(dff))
+    lat_col, lon_col = "_lat", "_lon"
+else:
+    lat_col, lon_col = LAT, LON
 
-# Risk
-w_fake = st.slider("Weight on Fake Probability (w)", 0.0, 1.0, 0.5, 0.05)
-fake_prob = pd.to_numeric(sub[fake_col], errors="coerce").median()
-s_gap = normalize_gap(gap) if gap is not None else None
-risk = risk_score(fake_prob, s_gap, w_fake=w_fake) if s_gap is not None else None
-rlevel = risk_level(risk)
+radius = st.slider("Radius", 50, 800, 120, 10)
 
-k1, k2, k3, k4 = st.columns(4)
-k1.metric("Gov Price 2026 (median)", f"{gov:.2f} mil VND/m²" if pd.notna(gov) else "N/A")
-k2.metric("Market Reference (median)", f"{mref:.2f} mil VND/m²" if pd.notna(mref) else "N/A")
-k3.metric("Price Gap", f"{gap2:.2f}× (corrected)" if gap2 is not None else (f"{gap:.2f}×" if gap is not None else "N/A"))
-k4.metric("Risk Score", f"{risk:.2f} ({rlevel})" if risk is not None else "N/A")
+view_state = pdk.ViewState(
+    latitude=float(dff[lat_col].median()),
+    longitude=float(dff[lon_col].median()),
+    zoom=12.5,
+    pitch=40 if layer_type == "Hexagon" else 0,
+)
 
-st.caption("Price Gap = Market Reference / Government Price. Risk Score combines data quality signal and Price Gap (normalized).")
+layers = []
+if layer_type == "Scatter":
+    layers.append(
+        pdk.Layer(
+            "ScatterplotLayer",
+            data=dff,
+            get_position=f"[{lon_col}, {lat_col}]",
+            get_radius=radius,
+            radius_units="meters",
+            get_fill_color="[255, 80, 80, 140]",
+            pickable=True,
+        )
+    )
+elif layer_type == "Heatmap":
+    layers.append(
+        pdk.Layer(
+            "HeatmapLayer",
+            data=dff,
+            get_position=f"[{lon_col}, {lat_col}]",
+            get_weight=weight_col,
+            radius_pixels=radius,
+            opacity=0.75,
+        )
+    )
+else:
+    layers.append(
+        pdk.Layer(
+            "HexagonLayer",
+            data=dff,
+            get_position=f"[{lon_col}, {lat_col}]",
+            radius=radius,
+            elevation_scale=25,
+            elevation_range=[0, 4000],
+            extruded=True,
+            pickable=True,
+            get_weight=weight_col,
+        )
+    )
 
-    # Explain rare case: MarketRef below GovPrice
-    if gap2 is not None and gap2 < 1:
-        st.warning("MarketRef is below GovPrice (Price Gap < 1). This may indicate (a) mapping/position mismatch, or (b) listing characteristics not comparable to land price. Please review Match Type / listing details.")
+tooltip = {"html": "<b>{District}</b> — {Ward}<br/>{Street}<br/>", "style": {"backgroundColor": "black", "color": "white"}}
 
+st.pydeck_chart(
+    pdk.Deck(
+        map_style="https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json",
+        initial_view_state=view_state,
+        layers=layers,
+        tooltip=tooltip,
+    ),
+    use_container_width=True,
+)
 
-st.markdown("### Reference listings")
-show_cols = [c for c in [
-    "Source","URL","Price (million VND)","Area (m²)","Unit Price (million VND/m²)",
-    "House Type","Road/Alley Width (m)","Floors",
-    gov_col, mref_col, "Price Gap (MarketRef / GovPrice)",
-    fake_col, "Normalized Gap Score", "Risk Score", "Risk Level", "Listing Text"
-] if c in sub.columns]
-st.dataframe(sub[show_cols].sort_values("Unit Price (million VND/m²)", ascending=False), use_container_width=True, hide_index=True)
+st.divider()
+st.subheader("Distributions")
 
-with st.expander("Legal disclaimer", expanded=False):
-    st.markdown("""- This is an **academic demo**.
-    - Listings are **asking prices**, not confirmed transaction prices.
-    - Government prices depend on mapping (ward/street) and official rules.
-    """)
+colA, colB = st.columns(2)
+with colA:
+    plt.figure()
+    pd.to_numeric(dff[GAP], errors="coerce").dropna().plot(kind="hist", bins=30)
+    plt.xlabel("Price Gap")
+    plt.ylabel("Count")
+    st.pyplot(plt.gcf())
+    plt.close()
+
+with colB:
+    plt.figure()
+    pd.to_numeric(dff[RISK], errors="coerce").dropna().plot(kind="hist", bins=30)
+    plt.xlabel("Risk Score")
+    plt.ylabel("Count")
+    st.pyplot(plt.gcf())
+    plt.close()
