@@ -1,6 +1,7 @@
 import pandas as pd
 import streamlit as st
 from pathlib import Path
+from utils.io import load_data
 
 DATA_PATH = Path(__file__).resolve().parents[1] / "data" / "RegTech_Data_Q1_Q5_2026.xlsx"
 
